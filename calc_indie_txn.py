@@ -254,10 +254,9 @@ class TransactionAnalyzer:
 
 
 async def main():
-    alchemy_url = f"https://eth-mainnet.g.alchemy.com/v2/{api_key}"
     web3 = Web3(Web3.HTTPProvider(alchemy_url))
 
-    target_time = int(time.time()) - (60)  # 24 hours
+    target_time = int(time.time()) - (24 * 60 * 60)  # 24 hours
 
     async with AsyncWeb3Client(alchemy_url) as web3_client:
         block_fetcher = BlockFetcher(web3_client, web3, target_time)

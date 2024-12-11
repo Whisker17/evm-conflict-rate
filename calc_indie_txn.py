@@ -11,7 +11,12 @@ from concurrent.futures import ThreadPoolExecutor
 import numpy as np
 from typing import List, Dict, Set, Any
 from collections import defaultdict
+from tqdm import tqdm
+from dotenv import load_dotenv
+import os
 
+load_dotenv()
+api_key = os.getenv('ALCHEMY_API_KEY')
 
 class AsyncWeb3Client:
     def __init__(self, api_url: str):
@@ -249,11 +254,10 @@ class TransactionAnalyzer:
 
 
 async def main():
-    api_key = "d9knunrAA3rrtjnNBkWloA0Z-tprIY9R"
     alchemy_url = f"https://eth-mainnet.g.alchemy.com/v2/{api_key}"
     web3 = Web3(Web3.HTTPProvider(alchemy_url))
 
-    target_time = int(time.time()) - (24 * 60 * 60)
+    target_time = int(time.time()) - (60)  # 24 hours
 
     async with AsyncWeb3Client(alchemy_url) as web3_client:
         block_fetcher = BlockFetcher(web3_client, web3, target_time)
@@ -264,35 +268,57 @@ async def main():
         blocks = await block_fetcher.fetch_blocks(latest_block)
 
         print(f"\nAnalyzing {len(blocks)} blocks...")
-        analysis_tasks = [tx_analyzer.analyze_block_dependencies(block) for block in blocks]
-        results = await asyncio.gather(*analysis_tasks)
+        
+        # Process blocks with progress bar
+        block_results = []
+        for block in tqdm(blocks, desc="Analyzing blocks"):
+            result = await tx_analyzer.analyze_block_dependencies(block)
+            
+            # Calculate block-specific metrics
+            total_txs = result['total_transactions']
+            total_pairs = total_txs * (total_txs - 1) // 2 if total_txs > 1 else 0
+            
+            print(f"\nBlock {result['block_number']}:")
+            print(f"  Transactions: {total_txs}")
+            print(f"  Possible pairs: {total_pairs}")
+            print(f"  Dependent pairs: {result['total_dependent_pairs']}")
+            print(f"  Dependency ratio: {result['dependency_ratio']:.2%}")
+            
+            block_results.append(result)
 
-        # Calculate total possible pairs across all blocks
+        # Calculate overall statistics
         total_possible_pairs = sum(
             r['total_transactions'] * (r['total_transactions'] - 1) // 2 
-            for r in results
+            for r in block_results
         )
-        total_dependent_pairs = sum(r['total_dependent_pairs'] for r in results)
+        total_dependent_pairs = sum(r['total_dependent_pairs'] for r in block_results)
+        
+        # Calculate average metrics
+        block_ratios = [r['dependency_ratio'] for r in block_results]
+        avg_block_ratio = sum(block_ratios) / len(block_ratios) if block_ratios else 0
+        overall_ratio = total_dependent_pairs / total_possible_pairs if total_possible_pairs > 0 else 0
 
         summary = {
             "time_period": "24 hours",
-            "total_blocks_analyzed": len(results),
-            "total_transactions": sum(r['total_transactions'] for r in results),
+            "total_blocks_analyzed": len(block_results),
+            "total_transactions": sum(r['total_transactions'] for r in block_results),
             "total_possible_pairs": total_possible_pairs,
             "total_dependent_pairs": total_dependent_pairs,
-            "average_dependency_ratio": total_dependent_pairs / total_possible_pairs if total_possible_pairs > 0 else 0,
-            "block_details": results
+            "overall_dependency_ratio": overall_ratio,
+            "average_block_dependency_ratio": avg_block_ratio,
+            "block_details": block_results
         }
 
         with open('dependency_analysis.json', 'w') as f:
             json.dump(summary, f, indent=2)
 
-        print("\nAnalysis Summary:")
+        print("\nOverall Analysis Summary:")
         print(f"Total blocks analyzed: {summary['total_blocks_analyzed']}")
         print(f"Total transactions: {summary['total_transactions']}")
-        print(f"Total possible transaction pairs: {summary['total_possible_pairs']}")
+        print(f"Total possible pairs: {summary['total_possible_pairs']}")
         print(f"Total dependent pairs: {summary['total_dependent_pairs']}")
-        print(f"Dependency ratio: {summary['total_dependent_pairs']} / {summary['total_possible_pairs']} = {summary['average_dependency_ratio']:.2%}")
+        print(f"Overall dependency ratio: {overall_ratio:.2%}")
+        print(f"Average block dependency ratio: {avg_block_ratio:.2%}")
         print("\nDetailed results saved to dependency_analysis.json")
 
 

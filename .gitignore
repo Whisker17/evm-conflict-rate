@@ -1,2 +1,6 @@
 .env
 dependency_analysis.json
+__pycache__/
+latest_block.json
+test.json
+transaction_details.json

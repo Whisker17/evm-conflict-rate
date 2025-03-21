@@ -202,7 +202,7 @@ def analyze_block(block_number: int, alchemy_url: str) -> Tuple[List[str], int, 
                 trace = trace_transaction(w3, tx_hash, rate_limiter)
                 traces[tx_hash] = trace
             except Exception as e:
-                print(f"Error fetching trace for {tx_hash}: {str(e)}")
+                # print(f"Error fetching trace for {tx_hash}: {str(e)}")
                 continue
         
         tx_modifications = {}

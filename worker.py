@@ -4,6 +4,11 @@ from typing import Dict, Set, List, Optional, Tuple
 from web3 import Web3
 import time
 from itertools import combinations
+import asyncio
+import random
+import nest_asyncio
+
+nest_asyncio.apply()
 
 @dataclass
 class Modification:
@@ -22,20 +27,29 @@ class Conflict:
     type: str
     details: str
 
-class RateLimiter:
-    def __init__(self, calls_per_second=5):
-        self.calls_per_second = calls_per_second
-        self.last_call_time = time.time()
-        
-    def acquire(self):
-        current_time = time.time()
-        time_since_last_call = current_time - self.last_call_time
-        
-        if time_since_last_call < (1.0 / self.calls_per_second):
-            sleep_time = (1.0 / self.calls_per_second) - time_since_last_call
-            time.sleep(sleep_time)
-        
-        self.last_call_time = time.time()
+MAX_RETRIES = 10  
+MAXIMUM_BACKOFF = 64 
+
+async def make_alchemy_request(func, *args, **kwargs):
+    """
+    封装 Alchemy 请求，处理速率限制和重试 (Exponential Backoff).
+    """
+    for attempt in range(MAX_RETRIES + 1):
+        try:
+            result = await func(*args, **kwargs)
+            return result
+        except Exception as e:
+            if "429" in str(e) and "Too Many Requests" in str(e):  
+                # Implement exponential backoff
+                random_number_milliseconds = random.randint(0, 1000)
+                wait_time = min(((2**attempt) + random_number_milliseconds), MAXIMUM_BACKOFF)
+                print(f"[yellow]Rate limit hit, retrying in {wait_time:.2f} seconds (attempt {attempt + 1}/{MAX_RETRIES + 1})[/]")
+                await asyncio.sleep(wait_time)  
+            else:
+                print(f"[red]Request failed with error: {e}[/]")
+                raise 
+    raise Exception("Max retries reached")  
+
 
 def get_function_selector(input_data: str) -> Optional[str]:
     return input_data[:10] if len(input_data) >= 10 else None
@@ -172,25 +186,48 @@ def check_modifications_conflict(mods1: List[Modification], mods2: List[Modifica
 
     return is_dependent, conflicts
 
-def trace_transaction(w3: Web3, tx_hash: str, rate_limiter: RateLimiter) -> dict:
-    rate_limiter.acquire()
-    
+async def _make_request(w3: Web3, method: str, params: List[str]) -> dict:
+    """
+    封装 web3.provider.make_request，使用 asyncio.to_thread 避免阻塞事件循环。
+    """
+    return await asyncio.to_thread(w3.provider.make_request, method, params)
+
+
+async def _trace_transaction(w3: Web3, tx_hash: str) -> dict:
+    """
+    获取交易的 trace 信息，处理速率限制和重试。
+    """
     if not tx_hash.startswith('0x'):
         tx_hash = '0x' + tx_hash
-        
-    return w3.provider.make_request(
-        "debug_traceTransaction", 
-        [tx_hash, {"tracer": "callTracer"}]
-    )
+    
+    try:
+        trace = await make_alchemy_request(_make_request, w3,
+            "debug_traceTransaction", 
+            [tx_hash, {"tracer": "callTracer"}]
+        )
+        return trace
+    except Exception as e:
+        print(f"Error fetching trace for {tx_hash}: {str(e)}")
+        return None
 
-def analyze_block(block_number: int, alchemy_url: str) -> Tuple[List[str], int, List[Conflict]]:
+def trace_transaction(w3: Web3, tx_hash: str) -> dict:
+    return asyncio.run(_trace_transaction(w3, tx_hash))
+
+
+async def _get_block(w3: Web3, block_number: int):
+    """
+    获取区块信息，使用 asyncio.to_thread 避免阻塞事件循环。
+    """
+    return await asyncio.to_thread(w3.eth.get_block, block_number, full_transactions=True)
+
+
+async def _analyze_block(block_number: int, alchemy_url: str) -> Tuple[List[str], int, List[Conflict]]:
     try:
         w3 = Web3(Web3.HTTPProvider(alchemy_url))
-        rate_limiter = RateLimiter(calls_per_second=5)
         
-        print(f"Analyzing block {block_number}...")
+        # print(f"Analyzing block {block_number}...")
         
-        block = w3.eth.get_block(block_number, full_transactions=True)
+        block = await make_alchemy_request(_get_block, w3, block_number)
         txs = [tx['hash'].hex() for tx in block['transactions']]
         
         if not txs:
@@ -199,8 +236,9 @@ def analyze_block(block_number: int, alchemy_url: str) -> Tuple[List[str], int, 
         traces = {}
         for tx_hash in txs:
             try:
-                trace = trace_transaction(w3, tx_hash, rate_limiter)
-                traces[tx_hash] = trace
+                trace = trace_transaction(w3, tx_hash)
+                if trace:
+                    traces[tx_hash] = trace
             except Exception as e:
                 # print(f"Error fetching trace for {tx_hash}: {str(e)}")
                 continue
@@ -227,3 +265,6 @@ def analyze_block(block_number: int, alchemy_url: str) -> Tuple[List[str], int, 
     except Exception as e:
         print(f"Error processing block {block_number}: {str(e)}")
         return [], 0, []
+
+def analyze_block(block_number: int, alchemy_url: str) -> Tuple[List[str], int, List[Conflict]]:
+    return asyncio.run(_analyze_block(block_number, alchemy_url))

@@ -4,6 +4,7 @@ from typing import Dict, Set, List, Optional, Tuple
 from web3 import Web3
 import time
 from itertools import combinations
+import config
 
 @dataclass
 class Modification:
@@ -173,17 +174,71 @@ def check_modifications_conflict(mods1: List[Modification], mods2: List[Modifica
     return is_dependent, conflicts
 
 def trace_transaction(w3: Web3, tx_hash: str, rate_limiter: RateLimiter) -> dict:
-    rate_limiter.acquire()
+    retries = 0
+    last_error = None
     
-    if not tx_hash.startswith('0x'):
-        tx_hash = '0x' + tx_hash
+    while retries <= config.MAX_RETRIES:
+        rate_limiter.acquire()
         
-    return w3.provider.make_request(
-        "debug_traceTransaction", 
-        [tx_hash, {"tracer": "callTracer"}]
-    )
+        if not tx_hash.startswith('0x'):
+            tx_hash = '0x' + tx_hash
+        
+        try:
+            response = w3.provider.make_request(
+                "debug_traceTransaction", 
+                [tx_hash, {"tracer": "callTracer"}]
+            )
+            
+            # 检查是否有错误信息表明这是一个 429 错误
+            if 'error' in response and isinstance(response['error'], dict):
+                error_info = response['error']
+                error_code = error_info.get('code')
+                error_msg = str(error_info).lower()
+                
+                if error_code == 429 or 'rate limit' in error_msg or 'too many requests' in error_msg:
+                    if retries < config.MAX_RETRIES:
+                        retries += 1
+                        # 指数退避策略
+                        sleep_time = config.RETRY_DELAY * (2 ** (retries - 1))
+                        print(f"Rate limit hit for {tx_hash}, retrying in {sleep_time}s (retry {retries}/{config.MAX_RETRIES})")
+                        time.sleep(sleep_time)
+                        last_error = f"Rate limit error: {error_info}"
+                        continue
+                    else:
+                        # 最大重试次数已用尽
+                        raise Exception(f"Rate limit exceeded after {config.MAX_RETRIES} retries for tx {tx_hash}: {error_info}")
+                else:
+                    # 其他API错误
+                    raise Exception(f"API error for tx {tx_hash}: {error_info}")
+            
+            # 确保有结果字段，否则可能是其他类型的错误
+            if 'result' not in response:
+                if retries < config.MAX_RETRIES:
+                    retries += 1
+                    sleep_time = config.RETRY_DELAY * (2 ** (retries - 1))
+                    print(f"Invalid response for {tx_hash}, retrying in {sleep_time}s (retry {retries}/{config.MAX_RETRIES})")
+                    time.sleep(sleep_time)
+                    last_error = f"Invalid response: {response}"
+                    continue
+                else:
+                    raise Exception(f"Invalid response after {config.MAX_RETRIES} retries for tx {tx_hash}: {response}")
+            
+            return response
+            
+        except Exception as e:
+            last_error = str(e)
+            if retries < config.MAX_RETRIES and ('429' in last_error or 'rate limit' in last_error.lower() or 'too many' in last_error.lower()):
+                retries += 1
+                sleep_time = config.RETRY_DELAY * (2 ** (retries - 1))
+                print(f"Rate limit exception for {tx_hash}, retrying in {sleep_time}s (retry {retries}/{config.MAX_RETRIES})")
+                time.sleep(sleep_time)
+            else:
+                raise Exception(f"Error tracing tx {tx_hash} after {retries} retries: {last_error}")
+    
+    # 如果所有重试都失败
+    raise Exception(f"Max retries ({config.MAX_RETRIES}) exceeded for transaction {tx_hash}. Last error: {last_error}")
 
-def analyze_block(block_number: int, alchemy_url: str) -> Tuple[List[str], int, List[Conflict]]:
+def analyze_block(block_number: int, alchemy_url: str) -> Tuple[List[str], int, List[Conflict], bool]:
     try:
         w3 = Web3(Web3.HTTPProvider(alchemy_url))
         rate_limiter = RateLimiter(calls_per_second=5)
@@ -194,16 +249,20 @@ def analyze_block(block_number: int, alchemy_url: str) -> Tuple[List[str], int, 
         txs = [tx['hash'].hex() for tx in block['transactions']]
         
         if not txs:
-            return [], 0, []
+            return [], 0, [], False
             
         traces = {}
+        failed_txs = []  # 记录失败的交易哈希
+        
         for tx_hash in txs:
             try:
                 trace = trace_transaction(w3, tx_hash, rate_limiter)
                 traces[tx_hash] = trace
             except Exception as e:
-                # print(f"Error fetching trace for {tx_hash}: {str(e)}")
-                continue
+                failed_txs.append(tx_hash)
+                print(f"Error fetching trace for {tx_hash} in block {block_number}: {str(e)}")
+                # 如果任何交易无法解析，立即标记整个区块失败
+                return [], len(txs), [], True
         
         tx_modifications = {}
         for tx_hash, trace in traces.items():
@@ -222,8 +281,8 @@ def analyze_block(block_number: int, alchemy_url: str) -> Tuple[List[str], int, 
                 dependent_txs.add(tx2)
                 all_conflicts.extend(conflicts)
         
-        return list(dependent_txs), len(txs), all_conflicts
+        return list(dependent_txs), len(txs), all_conflicts, False
     
     except Exception as e:
         print(f"Error processing block {block_number}: {str(e)}")
-        return [], 0, []
+        return [], 0, [], True

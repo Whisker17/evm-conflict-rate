@@ -9,15 +9,15 @@ import math
 from worker import analyze_block, Conflict
 from typing import List
 from collections import defaultdict
-import config  
-from rich.console import Console  
+import config
+from rich.console import Console
 from rich import print
 
 console = Console()
 
 async def get_24h_blocks(w3: Web3, block_time: int) -> List[int]:
     current_block = w3.eth.block_number
-    blocks_per_day = math.ceil(24 * 60 * 60 / block_time)  
+    blocks_per_day = math.ceil(1 * 60 * 60 / block_time)  
     # blocks_per_day = math.ceil(60 / block_time)
     return list(range(current_block - blocks_per_day + 1, current_block + 1))
 
@@ -28,6 +28,7 @@ async def analyze_chain(chain_config: dict):
     block_time = chain_config["block_time"]  
 
     console.print(f"\nAnalyzing {chain_name}...")
+    console.print(f"Rate limit retry configuration: max_retries={config.MAX_RETRIES}, retry_delay={config.RETRY_DELAY}s")
 
     w3 = Web3(Web3.HTTPProvider(alchemy_url))
 
@@ -41,6 +42,7 @@ async def analyze_chain(chain_config: dict):
     all_dependent_txs = []
     total_txs = 0
     all_conflicts = []
+    failed_blocks = 0
 
     conflict_counts = defaultdict(int)
 
@@ -56,22 +58,33 @@ async def analyze_chain(chain_config: dict):
 
         completed = 0
         for future in asyncio.as_completed([asyncio.wrap_future(f) for f in future_to_block]):
-            dependent_txs, block_total_txs, conflicts = await future
-            all_dependent_txs.extend(dependent_txs)
-            total_txs += block_total_txs
-            all_conflicts.extend(conflicts)
+            try:
+                dependent_txs, block_total_txs, conflicts, is_failed = await future
+                if is_failed:
+                    failed_blocks += 1
+                    block_num = future_to_block[future._future]
+                    console.print(f"[red]Failed to analyze block {block_num}[/]")
+                else:
+                    all_dependent_txs.extend(dependent_txs)
+                    total_txs += block_total_txs
+                    all_conflicts.extend(conflicts)
+            except Exception as e:
+                failed_blocks += 1
+                block_num = future_to_block[future._future]
+                console.print(f"[red]Exception processing block {block_num}: {str(e)}[/]")
 
             completed += 1
             progress = (completed / total_blocks) * 100
-            console.print(f"Progress: {progress:.1f}% ({completed}/{total_blocks} blocks)")
+            console.print(f"Progress: {progress:.1f}% ({completed}/{total_blocks} blocks, {failed_blocks} failed)")
             console.print(f"Current stats - Dependent: {len(all_dependent_txs)}, Total: {total_txs}")
 
             for conflict in conflicts:
-                console.print(f"Conflict Type: {conflict.type}, Details: {conflict.details}")
+                # console.print(f"Conflict Type: {conflict.type}, Details: {conflict.details}")
                 conflict_counts[conflict.type] += 1
 
     unique_dependent_txs = set(all_dependent_txs)
     dependency_ratio = len(unique_dependent_txs) / total_txs if total_txs > 0 else 0
+    block_success_rate = (total_blocks - failed_blocks) / total_blocks if total_blocks > 0 else 0
 
     end_time = time.time()  
     analysis_time = end_time - start_time  
@@ -82,12 +95,18 @@ async def analyze_chain(chain_config: dict):
 
     console.print(f"[green bold]\n{chain_name} Analysis Complete![/]")
     console.print(f"[white]Time taken: {analysis_time:.2f} seconds[/]")  
+    console.print(f"Total blocks analyzed: {total_blocks}")
+    console.print(f"Failed blocks: {failed_blocks} ({(failed_blocks/total_blocks)*100:.2f}%)")
+    console.print(f"Block analysis success rate: {block_success_rate:.2%}")
     console.print(f"Total transactions analyzed: {total_txs}")
     console.print(f"Dependent transactions found: {len(unique_dependent_txs)}")
     console.print(f"Dependency ratio: {dependency_ratio:.2%}")
 
     return {
         "chain_name": chain_name,
+        "total_blocks": total_blocks,
+        "failed_blocks": failed_blocks,
+        "block_success_rate": block_success_rate,
         "total_transactions": total_txs,
         "dependent_transactions": len(unique_dependent_txs),
         "dependency_ratio": dependency_ratio,
@@ -112,13 +131,15 @@ async def main():
     for result in chain_results:
         console.print(f"[magenta bold]\n{result['chain_name']}:[/]")
         console.print(f"[white]  Time taken: {result['analysis_time']:.2f} seconds[/]")  
+        console.print(f"  Total blocks: {result['total_blocks']}")
+        console.print(f"  Failed blocks: {result['failed_blocks']} ({(result['failed_blocks']/result['total_blocks'])*100:.2f}%)")
+        console.print(f"  Block success rate: {result['block_success_rate']:.2%}")
         console.print(f"  Total transactions: {result['total_transactions']}")
         console.print(f"  Dependent transactions: {result['dependent_transactions']}")
         console.print(f"  Dependency ratio: {result['dependency_ratio']:.2%}")
         console.print("  Conflict counts:")
         for conflict_type, count in result["conflict_counts"].items():
             console.print(f"    {conflict_type}: {count}")
-
 
 if __name__ == "__main__":
     asyncio.run(main())

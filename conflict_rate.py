@@ -23,13 +23,12 @@ async def get_24h_blocks(w3: Web3, block_time: int) -> List[int]:
 
 async def analyze_chain(chain_config: dict):
     chain_name = chain_config["name"]
-    alchemy_api_key = chain_config["alchemy_api_key"]
-    alchemy_url = chain_config["alchemy_url"].format(alchemy_api_key)
+    rpc_url = ""  # 使用不限流的RPC
     block_time = chain_config["block_time"]  
 
     console.print(f"\nAnalyzing {chain_name}...")
 
-    w3 = Web3(Web3.HTTPProvider(alchemy_url))
+    w3 = Web3(Web3.HTTPProvider(rpc_url))
     blocks = await get_24h_blocks(w3, block_time)  
     total_blocks = len(blocks)
     console.print(f"Analyzing {chain_name} {total_blocks} blocks from the last 24 hours...")
@@ -45,7 +44,7 @@ async def analyze_chain(chain_config: dict):
 
     conflict_counts = defaultdict(int)
 
-    worker_func = partial(analyze_block, alchemy_url=alchemy_url)
+    worker_func = partial(analyze_block, rpc_url=rpc_url)
 
     start_time = time.time()  
 

@@ -2,9 +2,7 @@
 from dataclasses import dataclass
 from typing import Dict, Set, List, Optional, Tuple
 from web3 import Web3
-import time
 from itertools import combinations
-from exponential_backoff import with_retry
 
 @dataclass
 class Modification:
@@ -22,21 +20,6 @@ class Conflict:
     contract_address: str
     type: str
     details: str
-
-class RateLimiter:
-    def __init__(self, calls_per_second=5):
-        self.calls_per_second = calls_per_second
-        self.last_call_time = time.time()
-        
-    def acquire(self):
-        current_time = time.time()
-        time_since_last_call = current_time - self.last_call_time
-        
-        if time_since_last_call < (1.0 / self.calls_per_second):
-            sleep_time = (1.0 / self.calls_per_second) - time_since_last_call
-            time.sleep(sleep_time)
-        
-        self.last_call_time = time.time()
 
 def get_function_selector(input_data: str) -> Optional[str]:
     return input_data[:10] if len(input_data) >= 10 else None
@@ -173,13 +156,10 @@ def check_modifications_conflict(mods1: List[Modification], mods2: List[Modifica
 
     return is_dependent, conflicts
 
-@with_retry(max_retries=10, initial_backoff=1.0, max_backoff=30.0)
-def trace_transaction(w3: Web3, tx_hash: str, rate_limiter: RateLimiter) -> dict:
+def trace_transaction(w3: Web3, tx_hash: str) -> dict:
     """
-    使用指数退避重试机制的交易跟踪函数
+    交易跟踪函数，无限流保护
     """
-    rate_limiter.acquire()
-    
     if not tx_hash.startswith('0x'):
         tx_hash = '0x' + tx_hash
     
@@ -191,16 +171,13 @@ def trace_transaction(w3: Web3, tx_hash: str, rate_limiter: RateLimiter) -> dict
     # 检查响应中是否包含错误
     if "error" in response:
         error = response.get("error", {})
-        # 检查是否为速率限制错误
-        if error.get("code") == -32005 or error.get("code") == 429:
-            raise Exception(f"Rate limit exceeded: {error.get('message', 'Too many requests')}")
+        raise Exception(f"Error tracing transaction: {error.get('message', 'Unknown error')}")
     
     return response
 
-def analyze_block(block_number: int, alchemy_url: str) -> Tuple[List[str], int, List[Conflict], List[str], bool]:
+def analyze_block(block_number: int, rpc_url: str) -> Tuple[List[str], int, List[Conflict], List[str], bool]:
     try:
-        w3 = Web3(Web3.HTTPProvider(alchemy_url))
-        rate_limiter = RateLimiter(calls_per_second=3)  # 降低初始请求速率
+        w3 = Web3(Web3.HTTPProvider(rpc_url))
         
         print(f"Analyzing block {block_number}...")
         
@@ -215,26 +192,15 @@ def analyze_block(block_number: int, alchemy_url: str) -> Tuple[List[str], int, 
         traces = {}
         failed_txs = []  # 记录解析失败的交易
         
-        # 为了减少并发压力，可以将交易分批处理
-        batch_size = 3  # 每批处理的交易数量
-        for i in range(0, len(txs), batch_size):
-            batch_txs = txs[i:i+batch_size]
-            
-            for tx_hash in batch_txs:
-                try:
-                    # 尝试获取交易的 trace 数据，这里会自动使用指数退避重试
-                    trace = trace_transaction(w3, tx_hash, rate_limiter)
-                    traces[tx_hash] = trace
-                    
-                    # 成功获取trace后添加额外的间隔，分散请求
-                    time.sleep(0.2)
-                except Exception as e:
-                    print.error(f"Error fetching trace for {tx_hash}: {str(e)}")
-                    failed_txs.append(tx_hash)
-                    continue
-            
-            # 每批处理后添加额外的延迟，减轻API负担
-            time.sleep(1.0)
+        for tx_hash in txs:
+            try:
+                # 获取交易的 trace 数据
+                trace = trace_transaction(w3, tx_hash)
+                traces[tx_hash] = trace
+            except Exception as e:
+                print(f"Error fetching trace for {tx_hash}: {str(e)}")
+                failed_txs.append(tx_hash)
+                continue
         
         # 分析交易的修改
         tx_modifications = {}

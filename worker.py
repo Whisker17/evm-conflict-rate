@@ -183,28 +183,34 @@ def trace_transaction(w3: Web3, tx_hash: str, rate_limiter: RateLimiter) -> dict
         [tx_hash, {"tracer": "callTracer"}]
     )
 
-def analyze_block(block_number: int, alchemy_url: str) -> Tuple[List[str], int, List[Conflict]]:
+def analyze_block(block_number: int, alchemy_url: str) -> Tuple[List[str], int, List[Conflict], List[str], bool]:
     try:
         w3 = Web3(Web3.HTTPProvider(alchemy_url))
         rate_limiter = RateLimiter(calls_per_second=5)
         
         print(f"Analyzing block {block_number}...")
         
+        # 获取区块及其交易
         block = w3.eth.get_block(block_number, full_transactions=True)
         txs = [tx['hash'].hex() for tx in block['transactions']]
         
+        # 如果区块中没有交易，返回空结果并标记为有效
         if not txs:
-            return [], 0, []
-            
+            return [], 0, [], [], True
+        
         traces = {}
+        failed_txs = []  # 记录解析失败的交易
         for tx_hash in txs:
             try:
+                # 尝试获取交易的 trace 数据
                 trace = trace_transaction(w3, tx_hash, rate_limiter)
                 traces[tx_hash] = trace
             except Exception as e:
-                # print(f"Error fetching trace for {tx_hash}: {str(e)}")
+                print(f"Error fetching trace for {tx_hash}: {str(e)}")
+                failed_txs.append(tx_hash)
                 continue
         
+        # 分析交易的修改
         tx_modifications = {}
         for tx_hash, trace in traces.items():
             tx_modifications[tx_hash] = analyze_trace(trace)
@@ -212,6 +218,7 @@ def analyze_block(block_number: int, alchemy_url: str) -> Tuple[List[str], int, 
         dependent_txs = set()
         all_conflicts = []
         
+        # 检查交易之间的冲突
         for tx1, tx2 in combinations(tx_modifications.keys(), 2):
             dependent, conflicts = check_modifications_conflict(
                 tx_modifications[tx1],
@@ -222,8 +229,12 @@ def analyze_block(block_number: int, alchemy_url: str) -> Tuple[List[str], int, 
                 dependent_txs.add(tx2)
                 all_conflicts.extend(conflicts)
         
-        return list(dependent_txs), len(txs), all_conflicts
+        # 判断区块是否有效：如果没有解析失败的交易，则有效
+        is_valid_block = len(failed_txs) == 0
+        
+        return list(dependent_txs), len(txs), all_conflicts, failed_txs, is_valid_block
     
     except Exception as e:
         print(f"Error processing block {block_number}: {str(e)}")
-        return [], 0, []
+        # 区块处理失败，视为无效
+        return [], 0, [], [], False

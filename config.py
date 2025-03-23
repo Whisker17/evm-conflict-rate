@@ -23,10 +23,10 @@ chains = [
     #     "alchemy_url": "https://base-mainnet.g.alchemy.com/v2/{}",
     #     "block_time": 2,
     # },
-    {
-        "name": "Optimism",
-        "alchemy_api_key": os.getenv("ALCHEMY_API_KEY"),  
-        "alchemy_url": "https://opt-mainnet.g.alchemy.com/v2/{}",
-        "block_time": 2,
-    },
+    # {
+    #     "name": "Optimism",
+    #     "alchemy_api_key": os.getenv("ALCHEMY_API_KEY"),  
+    #     "alchemy_url": "https://opt-mainnet.g.alchemy.com/v2/{}",
+    #     "block_time": 2,
+    # },
 ]

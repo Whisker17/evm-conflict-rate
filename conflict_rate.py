@@ -17,8 +17,8 @@ console = Console()
 
 async def get_24h_blocks(w3: Web3, block_time: int) -> List[int]:
     current_block = w3.eth.block_number
-    blocks_per_day = math.ceil(24 * 60 * 60 / block_time)  
-    # blocks_per_day = math.ceil(60 / block_time)
+    # blocks_per_day = math.ceil(24 * 60 * 60 / block_time)  
+    blocks_per_day = math.ceil(60 * 60 / block_time)
     return list(range(current_block - blocks_per_day + 1, current_block + 1))
 
 async def analyze_chain(chain_config: dict):
